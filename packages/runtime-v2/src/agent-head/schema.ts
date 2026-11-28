@@ -1046,8 +1046,10 @@ export const DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION = 10;
 export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
   `ALTER TABLE v2_task_artifacts ADD COLUMN r2_key TEXT;`,
   `CREATE TABLE IF NOT EXISTS v2_r2_pending_deletes (
-  r2_key        TEXT    PRIMARY KEY,
-  created_at_ms INTEGER NOT NULL
+  r2_key             TEXT    PRIMARY KEY,
+  created_at_ms      INTEGER NOT NULL,
+  next_attempt_at_ms INTEGER NOT NULL,
+  attempt_count      INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;`,
 ] as const;
 

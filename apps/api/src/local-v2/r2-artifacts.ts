@@ -102,6 +102,24 @@ export async function deleteV2R2KeysBestEffort(
 }
 
 /**
+ * Delete durably queued R2 keys and fail closed when `keys.length > 0` without an R2 binding
+ * so `v2_r2_pending_deletes` keeps the records for retry after configuration recovery.
+ */
+export async function deleteV2R2KeysStrict(
+  bucket: R2BucketPort | undefined,
+  keys: readonly string[],
+): Promise<void> {
+  if (keys.length === 0) return;
+  if (bucket === undefined) {
+    throw new DomainError(
+      'DB_UNAVAILABLE',
+      'EMBER_BLOBS R2 bucket binding is missing for pending R2 deletion',
+    );
+  }
+  await bucket.delete([...keys]);
+}
+
+/**
  * Reconcile staged R2 objects after a DO RPC error.
  * Deletes immediately on definite pre-commit rejections, verifies absence via `checkCommitted`
  * on ambiguous RPC errors, and retains objects if reconciliation itself is uncertain.

@@ -12,12 +12,16 @@ import { DomainError } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
+  R2_DELETE_RETRY_BASE_MS,
   V2_MAX_INLINE_ARTIFACT_BYTES,
+  V2_TIMING_LIMITS,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
   runV2FakePythonSandbox,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
+  type GlobalBudgetSettlePort,
+  type QueueLike,
   type RecoveryRegistryPort,
   type SqlStorageCursorLike,
   type SqlStorageRow,
@@ -29,6 +33,7 @@ import {
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
 import {
+  deleteV2R2KeysStrict,
   publishV2OutputsWithR2Reconciliation,
   stageV2UploadWithR2,
 } from '../../apps/api/src/local-v2/r2-artifacts.js';
@@ -165,8 +170,8 @@ function createTestCore(
           reconcileCoverageSync: (cmd) => facade.coverage.reconcileFromRegistrySync(cmd),
           confirmCoveragePlanSync: (cmd) => facade.coverage.confirmRegistryPlanSync(cmd),
           getOutboxByIdSync: (outboxId) => facade.outbox.getOutboxByIdSync(outboxId),
-          syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
-            facade.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs),
+          syncPlatformAlarm: (targetAlarmAtMs, nowMs, syncOpts) =>
+            facade.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs, syncOpts),
           getCoverageRowSync: () => facade.coverage.getCoverageRowSync(),
         },
       };
@@ -1398,15 +1403,11 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     expect(store.size).toBe(3);
   });
 
-  it('fault injection: does not delete R2 objects when SQLite transaction rolls back after purge, and durably retries failed R2 deletes', async () => {
+  it('fault injection: does not delete R2 objects when SQLite transaction rolls back after purge', async () => {
     const deletedKeys: string[][] = [];
-    let failDeletes = false;
     const clock = { now: 1_760_000_000_000 };
     const { core, storage } = createTestCore(clock, {
       deleteR2Keys: (keys) => {
-        if (failDeletes) {
-          return Promise.reject(new Error('transient R2 delete outage'));
-        }
         deletedKeys.push([...keys]);
         return Promise.resolve();
       },
@@ -1480,34 +1481,269 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     ).toBe(0);
     await core.flushDeletedR2Keys();
     expect(deletedKeys).toEqual([]);
+  });
 
-    // Now commit the convergence with transient R2 delete failure -> key stays queued and retries!
-    failDeletes = true;
-    storage.transactionSync(() => {
-      core.recoveryService.convergeDueBusinessItemSync('task', taskId, clock.now);
+  it('fault injection: schedules autonomous DO alarm and discovery bound with bounded exponential backoff on terminal R2 delete failures', async () => {
+    const deletedKeys: string[][] = [];
+    let failDeletes = true;
+    const clock = { now: 1_760_000_000_000 };
+    const { core, storage, facade } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        if (failDeletes) {
+          return Promise.reject(new Error('transient R2 delete outage'));
+        }
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
     });
-    expect(
-      storage.sql
-        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
-        .one().cnt,
-    ).toBe(1);
 
-    await core.flushDeletedR2Keys();
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843101',
+      input: { prompt: 'Autonomous R2 delete retry test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-r2-alarm',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d843102';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843103',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2-alarm',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'alarm-retry.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 64,
+          sha256: 'e'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Settle the task as terminal 'failed' while R2 delete fails:
+    // ZERO other tasks/turns/outbox/schedules remain, so only v2_r2_pending_deletes can arm recovery!
+    const commitRes = await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2-alarm',
+      outcome: {
+        status: 'failed',
+        reasonCode: 'internal_error',
+        simulated: true,
+      },
+    });
+    expect(commitRes.accepted).toBe(true);
     expect(deletedKeys).toEqual([]);
-    expect(
-      storage.sql
-        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
-        .one().cnt,
-    ).toBe(1);
+    const pendingAfterFirstFail = storage.sql
+      .exec<{ readonly attempt_count: number; readonly next_attempt_at_ms: number }>(
+        'SELECT attempt_count, next_attempt_at_ms FROM v2_r2_pending_deletes',
+      )
+      .one();
+    expect(pendingAfterFirstFail.attempt_count).toBe(1);
+    const firstRetryAt = clock.now + R2_DELETE_RETRY_BASE_MS;
+    expect(pendingAfterFirstFail.next_attempt_at_ms).toBe(firstRetryAt);
+    expect(await storage.getAlarm()).toBe(firstRetryAt);
+    expect(core.earliestRequiredDiscoveryAtMsSync(clock.now)).toBe(
+      firstRetryAt + V2_TIMING_LIMITS.d1RecoveryGraceMs,
+    );
 
-    // R2 recovers -> subsequent flush deletes the key and clears v2_r2_pending_deletes.
+    const noopQueue: QueueLike<V2DispatchEnvelope> = {
+      send: () => Promise.resolve(),
+    };
+    const noopGlobalBudgetSettle: GlobalBudgetSettlePort = {
+      settleGlobal: () => Promise.reject(new Error('unused in R2 alarm retry test')),
+    };
+    const registry = createMockRegistry();
+
+    // Firing an alarm before next_attempt_at_ms does not hit R2 prematurely and preserves alarm.
+    clock.now += 1_000;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+    expect(deletedKeys).toEqual([]);
+    expect(await storage.getAlarm()).toBe(firstRetryAt);
+
+    // Firing autonomous alarm at firstRetryAt while R2 is still failing backs off to 2x base (30s)
+    // and re-arms the DO platform alarm without any manual flushDeletedR2Keys() call.
+    clock.now = firstRetryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+    const pendingAfterSecondFail = storage.sql
+      .exec<{ readonly attempt_count: number; readonly next_attempt_at_ms: number }>(
+        'SELECT attempt_count, next_attempt_at_ms FROM v2_r2_pending_deletes',
+      )
+      .one();
+    const secondRetryAt = firstRetryAt + R2_DELETE_RETRY_BASE_MS * 2;
+    expect(pendingAfterSecondFail.attempt_count).toBe(2);
+    expect(pendingAfterSecondFail.next_attempt_at_ms).toBe(secondRetryAt);
+    expect(await storage.getAlarm()).toBe(secondRetryAt);
+
+    // R2 recovers -> firing the scheduled alarm autonomously deletes the R2 object, clears the
+    // outbox row, clears the DO alarm, and clears discovery obligation.
     failDeletes = false;
-    await core.flushDeletedR2Keys();
+    clock.now = secondRetryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
     expect(deletedKeys).toEqual([[outKey]]);
     expect(
       storage.sql
         .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
         .one().cnt,
     ).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
+    expect(core.earliestRequiredDiscoveryAtMsSync(clock.now)).toBeNull();
+  });
+
+  it('fault injection: deleteV2R2KeysStrict fails closed when EMBER_BLOBS is missing and preserves retryability across deploy recovery', async () => {
+    const deletedKeys: string[][] = [];
+    let boundBucket: R2BucketPort | undefined = undefined;
+    const clock = { now: 1_760_100_000_000 };
+    const { core, storage, facade } = createTestCore(clock, {
+      deleteR2Keys: (keys) => deleteV2R2KeysStrict(boundBucket, keys),
+    });
+
+    // Empty delete list when EMBER_BLOBS is absent must succeed cleanly (inline-only DOs).
+    await expect(deleteV2R2KeysStrict(undefined, [])).resolves.toBeUndefined();
+
+    // Non-empty delete list when EMBER_BLOBS is absent must throw DB_UNAVAILABLE, not swallow.
+    await expect(deleteV2R2KeysStrict(undefined, ['v2/uploads/t/u1'])).rejects.toMatchObject({
+      code: 'DB_UNAVAILABLE',
+    });
+
+    // Enqueue a cancel-triggered R2 delete while EMBER_BLOBS binding is missing.
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d844001',
+      input: { prompt: 'Missing R2 binding test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-missing-r2',
+      leaseMs: 10_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d844002';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d844003',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-missing-r2',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'missing-binding.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 32,
+          sha256: 'd'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Terminate run via commitDurableResult({ status: 'failed' }) while EMBER_BLOBS is missing:
+    // purges outKey into v2_r2_pending_deletes, fails closed on missing binding, and arms alarm.
+    await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-missing-r2',
+      outcome: {
+        status: 'failed',
+        reasonCode: 'internal_error',
+        simulated: true,
+      },
+    });
+
+    // Outbox record MUST be retained and backed off, with DO alarm armed at t + 15s.
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(1);
+    const retryAt = clock.now + R2_DELETE_RETRY_BASE_MS;
+    expect(await storage.getAlarm()).toBe(retryAt);
+
+    // Restore EMBER_BLOBS binding and run scheduled alarm -> pending R2 key is now deleted!
+    boundBucket = {
+      put: () => Promise.resolve(),
+      get: () => Promise.resolve(null),
+      delete: (keys) => {
+        deletedKeys.push(Array.isArray(keys) ? keys : [keys]);
+        return Promise.resolve();
+      },
+    };
+    const noopQueue: QueueLike<V2DispatchEnvelope> = {
+      send: () => Promise.resolve(),
+    };
+    const noopGlobalBudgetSettle: GlobalBudgetSettlePort = {
+      settleGlobal: () => Promise.reject(new Error('unused in missing-R2-binding test')),
+    };
+    clock.now = retryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry: createMockRegistry(),
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+
+    expect(deletedKeys).toEqual([[outKey]]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
   });
 });

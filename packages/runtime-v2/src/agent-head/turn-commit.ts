@@ -64,6 +64,7 @@ export interface TurnCommitRecoveryHooks {
   readonly syncPlatformAlarm?: (
     targetAlarmAtMs: number | null,
     nowMs: number,
+    options?: { readonly forceRearmConsumed?: boolean },
   ) => Promise<boolean | void>;
   readonly relayBudgetSync?: (nowMs: number) => Promise<void>;
   readonly getCoverageRowSync?: () => V2RecoveryCoverageRow | null;
@@ -220,7 +221,9 @@ export async function ensureRecoveryCoverageAsync(
           activeGen,
           errorName: upsertErr instanceof Error ? upsertErr.name : typeof upsertErr,
           errorMessage:
-            upsertErr instanceof Error ? upsertErr.message.slice(0, 240) : String(upsertErr).slice(0, 240),
+            upsertErr instanceof Error
+              ? upsertErr.message.slice(0, 240)
+              : String(upsertErr).slice(0, 240),
         }),
       );
       try {
@@ -258,7 +261,8 @@ export async function ensureRecoveryCoverageAsync(
             event: 'v2.recovery_coverage.readback_error',
             attempt,
             errorName: err instanceof Error ? err.name : typeof err,
-            errorMessage: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+            errorMessage:
+              err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
           }),
         );
         throw new DomainError('DB_UNAVAILABLE', 'recovery registry unavailable');

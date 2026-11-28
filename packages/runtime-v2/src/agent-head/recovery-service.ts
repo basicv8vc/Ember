@@ -34,7 +34,11 @@ import {
   type LocalBudgetCeilings,
 } from './budget.js';
 import { readPersonalMemoriesForTurnSync } from './memory-service.js';
-import { enqueuePendingR2DeletesSync, flushPendingR2Deletes } from './r2-delete-outbox.js';
+import {
+  earliestPendingR2DeleteAtMsSync,
+  enqueuePendingR2DeletesSync,
+  flushPendingR2Deletes,
+} from './r2-delete-outbox.js';
 import {
   assertHeadScopeSync,
   earliestBusinessAlarmAtMsSync,
@@ -101,6 +105,7 @@ export interface RecoveryCoordinatorHooks {
   readonly syncPlatformAlarm?: (
     targetAlarmAtMs: number | null,
     nowMs: number,
+    options?: { readonly forceRearmConsumed?: boolean },
   ) => Promise<boolean | void>;
 
   /** Maps to `relayDueBudgetSyncBatch`. */
@@ -131,9 +136,18 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     this.newId = deps.idFactory ?? (() => globalThis.crypto.randomUUID());
   }
 
-  flushDeletedR2Keys(): Promise<number> {
+  flushDeletedR2Keys(
+    nowMs = this.deps.nowMs(),
+    options?: { readonly skipAlarmSync?: boolean },
+  ): Promise<number> {
     return flushPendingR2Deletes({
       storage: this.deps.storage,
+      nowMs,
+      recomputeAlarmSync: (ts) => this.deps.eventCoordinator.recomputeAlarmSync(ts),
+      ...(this.deps.hooks.syncPlatformAlarm === undefined
+        ? {}
+        : { syncPlatformAlarm: this.deps.hooks.syncPlatformAlarm }),
+      ...(options?.skipAlarmSync === undefined ? {} : { skipAlarmSync: options.skipAlarmSync }),
       ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
     });
   }
@@ -153,6 +167,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
          FROM v2_schedules
         WHERE status = 'active'`,
     ).m;
+    const r2DeleteDue = earliestPendingR2DeleteAtMsSync(sql);
 
     // An accepted turn or active task run can create immediate budget_sync work at any
     // time before its lease expires. The lease alarm is not its discovery bound.
@@ -165,7 +180,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           WHERE t.execution_target = 'cloud' AND t.status = 'running' AND r.status = 'running'
        )`,
     ).m;
-    const candidates = [bizDue, outboxDue, schedDue, activeSince].filter(
+    const candidates = [bizDue, outboxDue, schedDue, r2DeleteDue, activeSince].filter(
       (v): v is number => v !== null,
     );
     if (candidates.length === 0) {
@@ -1735,7 +1750,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       recomputeAlarmSync: (ts) =>
         this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
-    await this.flushDeletedR2Keys();
+    await this.flushDeletedR2Keys(committed.nowMs);
     return { accepted: committed.accepted };
   }
 

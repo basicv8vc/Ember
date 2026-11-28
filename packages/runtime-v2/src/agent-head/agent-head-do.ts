@@ -134,8 +134,8 @@ function createLazyRecoveryHooksProxy(
     reconcileCoverageSync: (cmd) => getTarget().reconcileCoverageSync(cmd),
     confirmCoveragePlanSync: (cmd) => getTarget().confirmCoveragePlanSync(cmd),
     getOutboxByIdSync: (outboxId) => getTarget().getOutboxByIdSync?.(outboxId) ?? null,
-    syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
-      getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs) ?? Promise.resolve(),
+    syncPlatformAlarm: (targetAlarmAtMs, nowMs, options) =>
+      getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs, options) ?? Promise.resolve(),
     relayBudgetSync: (nowMs) => getTarget().relayBudgetSync?.(nowMs) ?? Promise.resolve(),
     getCoverageRowSync: () => getTarget().getCoverageRowSync?.() ?? null,
   };
@@ -532,8 +532,11 @@ export class AgentHeadCore
 
   // ---- AgentHeadRecoveryPort delegation ----
 
-  flushDeletedR2Keys(): Promise<number> {
-    return this.recoveryService.flushDeletedR2Keys();
+  flushDeletedR2Keys(
+    nowMs?: number,
+    options?: { readonly skipAlarmSync?: boolean },
+  ): Promise<number> {
+    return this.recoveryService.flushDeletedR2Keys(nowMs, options);
   }
 
   async reconcileFromRegistry(cmd: {
@@ -543,7 +546,7 @@ export class AgentHeadCore
     readonly nowMs: number;
   }) {
     const result = await this.recoveryService.reconcileFromRegistry(cmd);
-    await this.flushDeletedR2Keys();
+    await this.flushDeletedR2Keys(cmd.nowMs);
     return result;
   }
 

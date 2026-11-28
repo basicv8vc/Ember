@@ -179,6 +179,18 @@ export class AgentHeadTaskArtifactService {
     return this.deps.storage.sql;
   }
 
+  private flushDeletedR2Keys(nowMs: number): Promise<number> {
+    return flushPendingR2Deletes({
+      storage: this.deps.storage,
+      nowMs,
+      recomputeAlarmSync: (ts) => this.deps.eventCoordinator.recomputeAlarmSync(ts),
+      ...(this.deps.recoveryHooks.syncPlatformAlarm === undefined
+        ? {}
+        : { syncPlatformAlarm: this.deps.recoveryHooks.syncPlatformAlarm }),
+      ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
+    });
+  }
+
   async execute(cmd: TaskArtifactCommand): Promise<TaskArtifactResponse> {
     assertHeadScopeSync(this.sql, cmd.tenantId, cmd.agentId);
 
@@ -441,15 +453,13 @@ export class AgentHeadTaskArtifactService {
           expires_at: toIsoTimestamp(now + PYTHON_AGENT_LIMITS.maxUploadTtlMs),
           created_at: toIsoTimestamp(now),
         },
+        now,
         hasPendingDeletes: expiredRows.length > 0,
       };
     });
 
     if (tx.hasPendingDeletes) {
-      await flushPendingR2Deletes({
-        storage: this.deps.storage,
-        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
-      });
+      await this.flushDeletedR2Keys(tx.now);
     }
 
     return tx.receipt;
@@ -917,10 +927,7 @@ export class AgentHeadTaskArtifactService {
       await this.deps.recoveryHooks.syncPlatformAlarm?.(tx.alarmAtMs, tx.now);
     }
     if (tx.hasPendingDeletes) {
-      await flushPendingR2Deletes({
-        storage: this.deps.storage,
-        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
-      });
+      await this.flushDeletedR2Keys(tx.now);
     }
     return tx.result;
   }
@@ -1290,15 +1297,13 @@ export class AgentHeadTaskArtifactService {
       return {
         accepted: true,
         artifactIds,
+        now,
         hasPendingDeletes: replacedR2Rows.length > 0,
       };
     });
 
     if (tx.hasPendingDeletes) {
-      await flushPendingR2Deletes({
-        storage: this.deps.storage,
-        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
-      });
+      await this.flushDeletedR2Keys(tx.now);
     }
 
     return { accepted: tx.accepted, artifactIds: tx.artifactIds };

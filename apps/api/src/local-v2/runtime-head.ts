@@ -31,6 +31,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { V2ModelRuntimeEnv } from './model-runtime.js';
 import { resolveV2GlobalCeilingOverride, resolveV2LocalCeilings } from './model-runtime.js';
 import { resolveV2AllowRecurringBriefs } from './runtime-config.js';
+import { deleteV2R2KeysStrict } from './r2-artifacts.js';
 import type { EdgeAgentHeadRpc, HeadScope } from './rpc.js';
 
 export interface LocalRuntimeEnv extends GlobalBudgetBindings, V2ModelRuntimeEnv {
@@ -148,10 +149,7 @@ export class AgentHeadDO
       ...defaultGlobalBudgetOpts,
       ...(localCeilings === undefined ? {} : { localCeilings }),
       allowRecurringModelBriefs,
-      deleteR2Keys: async (keys) => {
-        if (keys.length === 0 || this.bindings.EMBER_BLOBS === undefined) return;
-        await this.bindings.EMBER_BLOBS.delete([...keys]);
-      },
+      deleteR2Keys: (keys) => deleteV2R2KeysStrict(this.bindings.EMBER_BLOBS, keys),
       eventRuntimeFactory(business) {
         events = new AgentEventRuntimeFacade({ ...scope, storage, business });
         return {
@@ -311,8 +309,8 @@ export class AgentHeadDO
       },
       globalBudget: core.createGlobalBudgetSettlePort(),
       registry: new D1RecoveryRegistry(this.bindings.D1_RECOVERY),
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
     });
-    await core.flushDeletedR2Keys();
   }
 
   override alarm() {

@@ -43,18 +43,18 @@ export interface ExecuteWebToolBatchResult {
 type SettledWebToolReceipt =
   | { readonly kind: 'search_success'; readonly response: WebSearchResponse }
   | { readonly kind: 'fetch_success'; readonly page: WebFetchResponse }
-  | { readonly kind: 'failure' };
+  | { readonly kind: 'failure'; readonly content: string };
 
 interface SettledWebToolEntry {
   readonly id: string;
-  readonly content: string;
   readonly counted: boolean;
   readonly receipt: SettledWebToolReceipt;
 }
 
 /**
- * Executes a round's bounded `web_search` and `web_fetch` tool calls and records
- * tool receipts into `evidenceCollector` in deterministic call order.
+ * Executes a round's bounded `web_search` and `web_fetch` tool calls, records
+ * tool receipts into `evidenceCollector` in deterministic call order, and formats
+ * search tool outputs with authoritative turn-wide source indices.
  */
 export async function executeWebToolCallBatch(
   params: ExecuteWebToolBatchParams,
@@ -77,24 +77,28 @@ export async function executeWebToolCallBatch(
           );
           return {
             id: call.id,
-            content: truncateToolOutputToTokenBudget(
-              formatWebFetchPolicyRefusal(validation.reason),
-              perCallTokenBudget,
-            ),
             counted: false,
-            receipt: { kind: 'failure' },
+            receipt: {
+              kind: 'failure',
+              content: truncateToolOutputToTokenBudget(
+                formatWebFetchPolicyRefusal(validation.reason),
+                perCallTokenBudget,
+              ),
+            },
           };
         }
 
         if (webSearch?.fetchPage === undefined) {
           return {
             id: call.id,
-            content: truncateToolOutputToTokenBudget(
-              'Web fetch unavailable: page fetching is not enabled in this runtime.',
-              perCallTokenBudget,
-            ),
             counted: false,
-            receipt: { kind: 'failure' },
+            receipt: {
+              kind: 'failure',
+              content: truncateToolOutputToTokenBudget(
+                'Web fetch unavailable: page fetching is not enabled in this runtime.',
+                perCallTokenBudget,
+              ),
+            },
           };
         }
 
@@ -102,10 +106,6 @@ export async function executeWebToolCallBatch(
           const page = await webSearch.fetchPage({ url: validation.url }, signal);
           return {
             id: call.id,
-            content: truncateToolOutputToTokenBudget(
-              formatWebFetchToolOutput(page),
-              perCallTokenBudget,
-            ),
             counted: true,
             receipt: { kind: 'fetch_success', page },
           };
@@ -116,12 +116,14 @@ export async function executeWebToolCallBatch(
           const reason = error instanceof Error ? error.message.slice(0, 120) : 'fetch_failed';
           return {
             id: call.id,
-            content: truncateToolOutputToTokenBudget(
-              `Web fetch unavailable (${reason}). Continue without fetching this page and be honest about what could not be read.`,
-              perCallTokenBudget,
-            ),
             counted: true,
-            receipt: { kind: 'failure' },
+            receipt: {
+              kind: 'failure',
+              content: truncateToolOutputToTokenBudget(
+                `Web fetch unavailable (${reason}). Continue without fetching this page and be honest about what could not be read.`,
+                perCallTokenBudget,
+              ),
+            },
           };
         }
       }
@@ -138,24 +140,28 @@ export async function executeWebToolCallBatch(
         );
         return {
           id: call.id,
-          content: truncateToolOutputToTokenBudget(
-            formatWebSearchPrivacyRefusal(privacy.reason),
-            perCallTokenBudget,
-          ),
           counted: false,
-          receipt: { kind: 'failure' },
+          receipt: {
+            kind: 'failure',
+            content: truncateToolOutputToTokenBudget(
+              formatWebSearchPrivacyRefusal(privacy.reason),
+              perCallTokenBudget,
+            ),
+          },
         };
       }
 
       if (webSearch === undefined) {
         return {
           id: call.id,
-          content: truncateToolOutputToTokenBudget(
-            'Web search unavailable: search_not_configured',
-            perCallTokenBudget,
-          ),
           counted: false,
-          receipt: { kind: 'failure' },
+          receipt: {
+            kind: 'failure',
+            content: truncateToolOutputToTokenBudget(
+              'Web search unavailable: search_not_configured',
+              perCallTokenBudget,
+            ),
+          },
         };
       }
 
@@ -163,10 +169,6 @@ export async function executeWebToolCallBatch(
         const searchResponse = await webSearch.search(args, signal);
         return {
           id: call.id,
-          content: truncateToolOutputToTokenBudget(
-            formatWebSearchToolOutput(searchResponse),
-            perCallTokenBudget,
-          ),
           counted: true,
           receipt: { kind: 'search_success', response: searchResponse },
         };
@@ -177,33 +179,57 @@ export async function executeWebToolCallBatch(
         const reason = error instanceof Error ? error.message.slice(0, 120) : 'search_failed';
         return {
           id: call.id,
-          content: truncateToolOutputToTokenBudget(
-            `Web search unavailable: ${reason}`,
-            perCallTokenBudget,
-          ),
           counted: true,
-          receipt: { kind: 'failure' },
+          receipt: {
+            kind: 'failure',
+            content: truncateToolOutputToTokenBudget(
+              `Web search unavailable: ${reason}`,
+              perCallTokenBudget,
+            ),
+          },
         };
       }
     }),
   );
 
   let executedCallsCount = 0;
+  const outputs: { readonly id: string; readonly content: string }[] = [];
+
   for (const entry of settled) {
     if (entry.counted) {
       executedCallsCount += 1;
     }
     if (entry.receipt.kind === 'search_success') {
       evidenceCollector.recordSearchSuccess(entry.receipt.response.results);
+      outputs.push({
+        id: entry.id,
+        content: truncateToolOutputToTokenBudget(
+          formatWebSearchToolOutput(entry.receipt.response, undefined, {
+            resolveIndex: (url) => evidenceCollector.getSourceIndexForUrl(url),
+          }),
+          perCallTokenBudget,
+        ),
+      });
     } else if (entry.receipt.kind === 'fetch_success') {
       evidenceCollector.recordFetchSuccess(entry.receipt.page);
+      outputs.push({
+        id: entry.id,
+        content: truncateToolOutputToTokenBudget(
+          formatWebFetchToolOutput(entry.receipt.page),
+          perCallTokenBudget,
+        ),
+      });
     } else {
       evidenceCollector.recordToolFailure();
+      outputs.push({
+        id: entry.id,
+        content: entry.receipt.content,
+      });
     }
   }
 
   return {
-    outputs: settled.map((entry) => ({ id: entry.id, content: entry.content })),
+    outputs,
     executedCallsCount,
   };
 }

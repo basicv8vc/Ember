@@ -189,6 +189,8 @@ export {
   validateWebFetchUrl,
   validateWebSearchQueryPrivacy,
   type ExaWebSearchClientOptions,
+  type FormatWebSearchToolOutputOptions,
+  type WebFetchContentKind,
   type WebFetchRequest,
   type WebFetchResponse,
   type WebFetchValidationReason,
@@ -212,6 +214,12 @@ export {
   type WebEvidenceStatus,
   type WebSource,
 } from './web-evidence.js';
+export {
+  executeWebToolCallBatch,
+  type ExecuteWebToolBatchParams,
+  type ExecuteWebToolBatchResult,
+  type WebToolCallInput,
+} from './providers/web-tool-batch.js';
 export {
   FakeStreamingModelGateway,
   FAKE_STREAM_MAX_REPLY_CHARS,

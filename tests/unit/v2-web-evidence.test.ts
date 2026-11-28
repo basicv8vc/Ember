@@ -20,6 +20,7 @@ import {
   OpenRouterModelGateway,
   WEB_EVIDENCE_COLLECTOR_LIMITS,
   WebEvidenceCollector,
+  executeWebToolCallBatch,
   findRateRow,
   type ConversationTurnInput,
   type FetchLike,
@@ -1387,6 +1388,158 @@ describe('V2 Web Evidence Contract, Collector, DO Storage & Routes', () => {
           )
         ).status,
       ).toBe(404);
+    });
+  });
+
+  describe('CTO Review Fixes (#303)', () => {
+    it('does not mark fetched=true when Exa fetchPage falls back to highlights without full text', async () => {
+      const client = new ExaWebSearchClient({
+        apiKey: 'exa-test',
+        fetchImpl: async (url) => {
+          await Promise.resolve();
+          expect(String(url)).toBe(EXA_CONTENTS_URL);
+          return jsonResponse({
+            results: [
+              {
+                url: 'https://example.com/snippet-only',
+                title: 'Snippet Only Page',
+                text: '   ',
+                highlights: ['Short highlight excerpt from search index.'],
+              },
+            ],
+          });
+        },
+      });
+
+      const page = await client.fetchPage(
+        { url: 'https://example.com/snippet-only' },
+        new AbortController().signal,
+      );
+      expect(page.contentKind).toBe('highlights');
+      expect(page.content).toBe('Short highlight excerpt from search index.');
+
+      const collector = new WebEvidenceCollector(randomUUID());
+      collector.recordFetchSuccess(page);
+      const built = collector.build();
+      expect(built).toBeDefined();
+      expect(built!.sources).toHaveLength(1);
+      expect(built!.sources[0]!.fetched).toBe(false);
+      expect(built!.sources[0]!.snippet).toContain('Short highlight excerpt');
+    });
+
+    it('rejects private, loopback, metadata, local, and obfuscated URLs in WebEvidenceSchema directly', () => {
+      const rejectedUrls = [
+        'http://127.0.0.1/admin',
+        'http://localhost:8787/test',
+        'http://sub.localhost/test',
+        'http://10.0.0.5/internal',
+        'http://172.16.1.2/internal',
+        'http://192.168.1.10/router',
+        'http://169.254.169.254/latest/meta-data',
+        'http://0.0.0.0:3000/',
+        'http://[::1]:8080/',
+        'http://[fe80::1]/',
+        'http://[fd12::1]/',
+        'http://[::ffff:127.0.0.1]/',
+        'http://redis/keys',
+        'https://ember.local/service',
+        'https://metadata.internal/token',
+        'https://user:pass@example.com/ok',
+      ];
+
+      for (const badUrl of rejectedUrls) {
+        expect(() =>
+          WebEvidenceSchema.parse({
+            schema_version: 1,
+            turn_id: randomUUID(),
+            status: 'completed',
+            sources: [
+              {
+                source_id: 'src-1',
+                index: 1,
+                title: 'Bad',
+                url: badUrl,
+                domain: 'example.com',
+                fetched: false,
+              },
+            ],
+          }),
+        ).toThrow();
+      }
+
+      expect(() =>
+        WebEvidenceSchema.parse({
+          schema_version: 1,
+          turn_id: randomUUID(),
+          status: 'completed',
+          sources: [
+            {
+              source_id: 'src-1',
+              index: 1,
+              title: 'Public IPv4',
+              url: 'https://93.184.216.34/doc',
+              domain: '93.184.216.34',
+              fetched: true,
+            },
+          ],
+        }),
+      ).not.toThrow();
+    });
+
+    it('aligns tool-output citation numbers across multi-call and multi-round search batches with WebEvidence indices', async () => {
+      const collector = new WebEvidenceCollector(randomUUID());
+      const responses = new Map<string, readonly { title: string; url: string }[]>([
+        [
+          'query one',
+          [
+            { title: 'Alpha', url: 'https://alpha.example.com/1' },
+            { title: 'Beta', url: 'https://beta.example.com/2' },
+          ],
+        ],
+        [
+          'query two',
+          [
+            { title: 'Beta Duplicate', url: 'https://beta.example.com/2#' },
+            { title: 'Gamma', url: 'https://gamma.example.com/3' },
+          ],
+        ],
+      ]);
+
+      const round1 = await executeWebToolCallBatch({
+        calls: [
+          { id: 'c1', name: 'web_search', arguments: JSON.stringify({ query: 'query one' }) },
+          { id: 'c2', name: 'web_search', arguments: JSON.stringify({ query: 'query two' }) },
+        ],
+        round: 1,
+        perCallTokenBudget: 1_500,
+        webSearch: {
+          search: async (req) => ({
+            query: req.query,
+            results: (responses.get(req.query) ?? []).map((item) => ({
+              title: item.title,
+              url: item.url,
+              snippets: [],
+            })),
+          }),
+        },
+        privacyContext: {},
+        evidenceCollector: collector,
+        signal: new AbortController().signal,
+      });
+
+      expect(round1.outputs[0]!.content).toContain('[1] Alpha');
+      expect(round1.outputs[0]!.content).toContain('[2] Beta');
+      // Second search call must NOT reset Beta/Gamma back to [1], [2]; must align with [2], [3].
+      expect(round1.outputs[1]!.content).toContain('[2] Beta Duplicate');
+      expect(round1.outputs[1]!.content).toContain('[3] Gamma');
+      expect(round1.outputs[1]!.content).not.toContain('[1] Beta Duplicate');
+
+      const built = collector.build()!;
+      expect(built.sources.map((s) => `${s.index}:${s.url}`)).toEqual([
+        '1:https://alpha.example.com/1',
+        '2:https://beta.example.com/2',
+        '3:https://gamma.example.com/3',
+      ]);
     });
   });
 });

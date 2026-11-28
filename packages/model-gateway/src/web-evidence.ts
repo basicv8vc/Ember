@@ -1,4 +1,4 @@
-import { sanitizePublicWebUrl } from './web-search.js';
+import { sanitizePublicWebUrl, type WebFetchContentKind } from './web-search.js';
 
 export const WEB_EVIDENCE_COLLECTOR_LIMITS = Object.freeze({
   schemaVersion: 1,
@@ -44,6 +44,7 @@ export interface FetchEvidenceResultInput {
   readonly title: string;
   readonly publishedDate?: string;
   readonly content: string;
+  readonly contentKind?: WebFetchContentKind;
 }
 
 const textEncoder = new TextEncoder();
@@ -215,11 +216,22 @@ export class WebEvidenceCollector {
     }
   }
 
+  getSourceIndexForUrl(rawUrl: string): number | undefined {
+    const canonicalUrl = canonicalizeWebEvidenceUrl(rawUrl);
+    if (canonicalUrl === null) {
+      return undefined;
+    }
+    const zeroBased = this.#orderedUrls.indexOf(canonicalUrl);
+    return zeroBased >= 0 ? zeroBased + 1 : undefined;
+  }
+
   recordFetchSuccess(result: FetchEvidenceResultInput): void {
-    // Only count web_fetch as fetched when real non-empty content was retrieved.
-    if (result.content.trim().length === 0) {
+    // Only mark a source as fetched when real full-page text was extracted;
+    // highlights-only fallbacks or empty bodies must stay fetched=false.
+    if (result.content.trim().length === 0 || result.contentKind === 'empty') {
       return;
     }
+    const hasFullText = result.contentKind !== 'highlights';
 
     const canonicalUrl = canonicalizeWebEvidenceUrl(result.url);
     if (canonicalUrl === null) {
@@ -245,7 +257,9 @@ export class WebEvidenceCollector {
 
     const existing = this.#sourcesByUrl.get(canonicalUrl);
     if (existing !== undefined) {
-      existing.fetched = true;
+      if (hasFullText) {
+        existing.fetched = true;
+      }
       if (
         candidateTitle !== undefined &&
         candidateTitle !== canonicalUrl &&
@@ -274,7 +288,7 @@ export class WebEvidenceCollector {
       domain,
       ...(contentSnippet !== undefined ? { snippet: contentSnippet } : {}),
       ...(nextPublishedAt !== undefined ? { published_at: nextPublishedAt } : {}),
-      fetched: true,
+      fetched: hasFullText,
     };
     this.#orderedUrls.push(canonicalUrl);
     this.#sourcesByUrl.set(canonicalUrl, draft);

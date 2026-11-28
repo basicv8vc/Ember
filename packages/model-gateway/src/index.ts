@@ -185,9 +185,12 @@ export {
   WEB_SEARCH_LIMITS,
   formatWebFetchToolOutput,
   formatWebSearchToolOutput,
+  sanitizePublicWebUrl,
   validateWebFetchUrl,
   validateWebSearchQueryPrivacy,
   type ExaWebSearchClientOptions,
+  type FormatWebSearchToolOutputOptions,
+  type WebFetchContentKind,
   type WebFetchRequest,
   type WebFetchResponse,
   type WebFetchValidationReason,
@@ -200,6 +203,23 @@ export {
   type WebSearchResponse,
   type WebSearchResultItem,
 } from './web-search.js';
+export {
+  WEB_EVIDENCE_COLLECTOR_LIMITS,
+  WebEvidenceCollector,
+  canonicalizeWebEvidenceUrl,
+  extractDomainFromUrl,
+  type FetchEvidenceResultInput,
+  type SearchEvidenceResultInput,
+  type WebEvidence,
+  type WebEvidenceStatus,
+  type WebSource,
+} from './web-evidence.js';
+export {
+  executeWebToolCallBatch,
+  type ExecuteWebToolBatchParams,
+  type ExecuteWebToolBatchResult,
+  type WebToolCallInput,
+} from './providers/web-tool-batch.js';
 export {
   FakeStreamingModelGateway,
   FAKE_STREAM_MAX_REPLY_CHARS,

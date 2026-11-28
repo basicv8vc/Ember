@@ -6,6 +6,8 @@ import type {
   B1SendMessageRequest,
   B3StagedUploadMediaType,
   DelegationToolName,
+  V2ConversationWebEvidencePage,
+  WebEvidence,
 } from '@ember/contracts';
 import type { Id, NotesActionItemsInput } from '@ember/domain';
 import type { ModelAttemptBudgetMode, ModelAttemptProviderId } from '../agent-head/schema.js';
@@ -236,6 +238,7 @@ export interface CommitTurnRequest {
         readonly personalMemorySave?: PersonalMemorySaveTurnCommand;
         readonly personalMemoryDelete?: PersonalMemoryDeleteTurnCommand;
         readonly proactiveScheduleCreate?: ProactiveScheduleTurnCommand;
+        readonly webEvidence?: WebEvidence;
       }
     | {
         readonly status: 'failed';
@@ -264,6 +267,7 @@ export type CommitTurnResult =
       readonly responseMessageId: Id;
       readonly sequence: number;
       readonly delegatedTaskId: Id | null;
+      readonly webEvidence?: WebEvidence;
     }
   | {
       readonly outcome: 'reconciled_only';
@@ -306,6 +310,13 @@ export interface AgentHeadRpc {
     readonly after: number;
     readonly limit: number;
   }): Promise<B1ConversationPage>;
+  readWebEvidence(req: {
+    readonly tenantId: Id;
+    readonly agentId: Id;
+    readonly conversationId: Id;
+    readonly after: number;
+    readonly limit: number;
+  }): Promise<V2ConversationWebEvidencePage>;
   findSubmissionReceipt(req: {
     readonly tenantId: Id;
     readonly agentId: Id;

@@ -191,7 +191,7 @@ type ParsedPageQuery =
  * default page (a silent behaviour change), and a smuggled `tenant_id` would look accepted even though
  * it is never read.
  */
-function parseMessagePageQuery(searchParams: URLSearchParams): ParsedPageQuery {
+export function parseMessagePageQuery(searchParams: URLSearchParams): ParsedPageQuery {
   for (const key of searchParams.keys()) {
     if (key !== 'after' && key !== 'limit') {
       return { ok: false, diagnostic: 'only after and limit query parameters are allowed' };
@@ -235,7 +235,7 @@ function hasAnyQueryParam(searchParams: URLSearchParams): boolean {
 }
 
 /** I-1: an identity scope field is rejected rather than overridden by the verified session. */
-function rejectClientScope(c: AppContext): Response | undefined {
+export function rejectClientScope(c: AppContext): Response | undefined {
   const query = c.req.query();
   const hasQueryScope = FORBIDDEN_SCOPE_QUERY_KEYS.some((key) => query[key] !== undefined);
   const hasHeaderScope = FORBIDDEN_SCOPE_HEADERS.some(

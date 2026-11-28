@@ -93,6 +93,7 @@ export function createEdgeRpc(head: AgentHeadDO): LocalEdgeRpc {
     commitTurn: (req) => call('commitTurn', req),
     handoffTurnToDurable: (req) => call('handoffTurnToDurable', req),
     readMessages: (req) => call('readMessages', req),
+    readWebEvidence: (req) => call('readWebEvidence', req),
     findSubmissionReceipt: (req) => call('findSubmissionReceipt', req),
     getTurn: (req) => call('getTurn', req),
     cancelTurn: (req) => call('cancelTurn', req),

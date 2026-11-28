@@ -2,9 +2,12 @@ import {
   B1AssistantTurnDtoSchema,
   B1ConversationMessageSchema,
   TaskCommandSchema,
+  WebEvidenceSchema,
   toInvalidArgumentError,
   type B1AssistantTurnDto,
   type B1ConversationMessage,
+  type V2WebEvidenceItem,
+  type WebEvidence,
 } from '@ember/contracts';
 import { DomainError, type Id, type TaskCommand } from '@ember/domain';
 import { V2_B1_COMPAT_CONSTANTS } from '../contracts/constants.js';
@@ -409,4 +412,128 @@ export async function deterministicEdgeUuid(seed: string): Promise<Id> {
   arr[8] = (arr[8]! & 0x3f) | 0x80;
   const hex = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+export function hasMessageWebEvidenceTableSync(sql: SqlStorageLike): boolean {
+  return (
+    sql
+      .exec<{ readonly name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_web_evidence'`,
+      )
+      .toArray().length > 0
+  );
+}
+
+/**
+ * Validates and stores turn web evidence linked to `response_message_id` inside
+ * the authoritative commit transaction.
+ */
+export function insertMessageWebEvidenceSync(params: {
+  readonly sql: SqlStorageLike;
+  readonly messageId: Id;
+  readonly turnId: Id;
+  readonly webEvidence: WebEvidence;
+  readonly nowMs: number;
+}): WebEvidence {
+  const parsed = WebEvidenceSchema.parse(params.webEvidence);
+  if (parsed.turn_id !== params.turnId) {
+    throw new DomainError('INVALID_ARGUMENT', 'web_evidence turn_id does not match committed turn');
+  }
+  if (parsed.status === 'failed' || parsed.sources.length === 0) {
+    throw new DomainError(
+      'INVALID_ARGUMENT',
+      'cannot persist empty or failed web_evidence on committed turn',
+    );
+  }
+
+  params.sql.exec(
+    `INSERT INTO message_web_evidence (
+      message_id, turn_id, schema_version, status, evidence_json, created_at_ms
+    ) VALUES (?, ?, ?, ?, ?, ?)`,
+    params.messageId,
+    params.turnId,
+    parsed.schema_version,
+    parsed.status,
+    JSON.stringify(parsed),
+    params.nowMs,
+  );
+  return parsed;
+}
+
+interface JoinedWebEvidencePageRow {
+  readonly message_id: string;
+  readonly sequence: number;
+  readonly evidence_json: string | null;
+}
+
+/**
+ * Reads a sequence-cursor-aligned page of web evidence items for a conversation.
+ */
+export function listMessageWebEvidencePageSync(params: {
+  readonly sql: SqlStorageLike;
+  readonly conversationId: Id;
+  readonly after: number;
+  readonly limit: number;
+}): {
+  readonly items: readonly V2WebEvidenceItem[];
+  readonly nextAfter: number;
+  readonly hasMore: boolean;
+} {
+  const includeEvidence = hasMessageWebEvidenceTableSync(params.sql);
+  const rows = includeEvidence
+    ? sqlExecAll<JoinedWebEvidencePageRow>(
+        params.sql,
+        `SELECT
+           m.id AS message_id,
+           m.sequence AS sequence,
+           e.evidence_json AS evidence_json
+         FROM conversation_messages m
+         LEFT JOIN message_web_evidence e ON e.message_id = m.id
+         WHERE m.conversation_id = ?
+           AND m.sequence > ?
+         ORDER BY m.sequence ASC
+         LIMIT ?`,
+        params.conversationId,
+        params.after,
+        params.limit + 1,
+      )
+    : sqlExecAll<{ readonly id: string; readonly sequence: number }>(
+        params.sql,
+        `SELECT id, sequence
+           FROM conversation_messages
+          WHERE conversation_id = ?
+            AND sequence > ?
+          ORDER BY sequence ASC
+          LIMIT ?`,
+        params.conversationId,
+        params.after,
+        params.limit + 1,
+      ).map((row) => ({
+        message_id: row.id,
+        sequence: row.sequence,
+        evidence_json: null,
+      }));
+
+  const hasMore = rows.length > params.limit;
+  const pageRows = rows.slice(0, params.limit);
+  const lastRow = pageRows.at(-1);
+  const items: V2WebEvidenceItem[] = [];
+
+  for (const row of pageRows) {
+    if (row.evidence_json === null) {
+      continue;
+    }
+    const parsedEvidence = WebEvidenceSchema.parse(JSON.parse(row.evidence_json) as unknown);
+    items.push({
+      response_message_id: row.message_id,
+      sequence: row.sequence,
+      web_evidence: parsedEvidence,
+    });
+  }
+
+  return {
+    items,
+    nextAfter: lastRow === undefined ? params.after : lastRow.sequence,
+    hasMore,
+  };
 }

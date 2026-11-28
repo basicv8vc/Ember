@@ -1,6 +1,11 @@
 import type { ObservedTurnUsage } from '@ember/runtime-v2';
 export type { ObservedTurnUsage } from '@ember/runtime-v2';
-import { B1AssistantTurnDtoSchema, IdSchema } from '@ember/contracts';
+import {
+  B1AssistantTurnDtoSchema,
+  IdSchema,
+  WebEvidenceSchema,
+  type WebEvidence,
+} from '@ember/contracts';
 import {
   buildBoundedContext,
   estimateCostMicroUsd,
@@ -299,6 +304,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
           turn: B1AssistantTurnDtoSchema.parse(committed.turn),
           response_message_id: IdSchema.parse(committed.responseMessageId),
           sequence: committed.sequence,
+          ...(committed.webEvidence !== undefined
+            ? { web_evidence: WebEvidenceSchema.parse(committed.webEvidence) }
+            : {}),
         });
       }
     } finally {
@@ -481,6 +489,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
               : {}),
             ...(reply.output.kind === 'create_schedule'
               ? { proactiveScheduleCreate: reply.output.schedule.arguments }
+              : {}),
+            ...(reply.output.webEvidence !== undefined
+              ? { webEvidence: reply.output.webEvidence as WebEvidence }
               : {}),
           },
     });

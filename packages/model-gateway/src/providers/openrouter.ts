@@ -25,27 +25,17 @@ import {
   completionMessageSchema,
   estimateProviderMessagesInputTokens,
   extractLatestUserMessageText,
-  formatWebFetchPolicyRefusal,
-  formatWebSearchPrivacyRefusal,
   getConversationTools,
   maxInputTokensForRemainingCost,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
   parsePythonAgentStepChoice,
-  parseWebFetchToolArguments,
-  parseWebSearchToolArguments,
   rateRequestModifiers,
-  truncateToolOutputToTokenBudget,
   type ProviderChatMessage,
 } from './shared.js';
-import {
-  WEB_SEARCH_LIMITS,
-  formatWebFetchToolOutput,
-  formatWebSearchToolOutput,
-  validateWebFetchUrl,
-  validateWebSearchQueryPrivacy,
-  type WebSearchPort,
-} from '../web-search.js';
+import { WebEvidenceCollector } from '../web-evidence.js';
+import { WEB_SEARCH_LIMITS, type WebSearchPort } from '../web-search.js';
+import { executeWebToolCallBatch } from './web-tool-batch.js';
 
 export const OPENROUTER_ORIGIN = 'https://openrouter.ai';
 export const OPENROUTER_CHAT_COMPLETIONS_PATH = '/api/v1/chat/completions';
@@ -250,6 +240,7 @@ export class OpenRouterModelGateway implements ModelGateway {
       ...(input.personalMemories !== undefined ? { personalMemories: input.personalMemories } : {}),
       latestUserMessageText,
     };
+    const evidenceCollector = new WebEvidenceCollector(input.turnId);
 
     let accumulatedUsage: ModelUsage | null = null;
     let sawMissingUsage = false;
@@ -423,107 +414,18 @@ export class OpenRouterModelGateway implements ModelGateway {
           Math.floor((availableToolTokens - 16) / cappedCalls.length),
         );
 
-        const toolOutputs = await Promise.all(
-          cappedCalls.map(async (call) => {
-            if (call.name === WEB_FETCH_TOOL_NAME) {
-              const args = parseWebFetchToolArguments(call.arguments);
-              const validation = validateWebFetchUrl(args.url);
-              if (!validation.ok) {
-                console.log(
-                  JSON.stringify({
-                    event: 'v2.web_fetch.policy_refused',
-                    round,
-                    reason: validation.reason,
-                  }),
-                );
-                return {
-                  id: call.id,
-                  content: truncateToolOutputToTokenBudget(
-                    formatWebFetchPolicyRefusal(validation.reason),
-                    perCallTokenBudget,
-                  ),
-                };
-              }
-              if (this.#webSearch?.fetchPage === undefined) {
-                return {
-                  id: call.id,
-                  content: truncateToolOutputToTokenBudget(
-                    'Web fetch unavailable: page fetching is not enabled in this runtime.',
-                    perCallTokenBudget,
-                  ),
-                };
-              }
-              totalSearchCalls += 1;
-              try {
-                const page = await this.#webSearch.fetchPage({ url: validation.url }, signal);
-                return {
-                  id: call.id,
-                  content: truncateToolOutputToTokenBudget(
-                    formatWebFetchToolOutput(page),
-                    perCallTokenBudget,
-                  ),
-                };
-              } catch (error) {
-                if (signal.aborted) {
-                  throw new ModelGatewayFailure('model_timeout');
-                }
-                const reason =
-                  error instanceof Error ? error.message.slice(0, 120) : 'fetch_failed';
-                return {
-                  id: call.id,
-                  content: truncateToolOutputToTokenBudget(
-                    `Web fetch unavailable (${reason}). Continue without fetching this page and be honest about what could not be read.`,
-                    perCallTokenBudget,
-                  ),
-                };
-              }
-            }
+        const batchResult = await executeWebToolCallBatch({
+          calls: cappedCalls,
+          round,
+          perCallTokenBudget,
+          webSearch: this.#webSearch,
+          privacyContext,
+          evidenceCollector,
+          signal,
+        });
+        totalSearchCalls += batchResult.executedCallsCount;
 
-            const args = parseWebSearchToolArguments(call.arguments);
-            const privacy = validateWebSearchQueryPrivacy(args.query, privacyContext);
-            if (!privacy.ok) {
-              console.log(
-                JSON.stringify({
-                  event: 'v2.web_search.privacy_refused',
-                  round,
-                  reason: privacy.reason,
-                }),
-              );
-              return {
-                id: call.id,
-                content: truncateToolOutputToTokenBudget(
-                  formatWebSearchPrivacyRefusal(privacy.reason),
-                  perCallTokenBudget,
-                ),
-              };
-            }
-            totalSearchCalls += 1;
-            try {
-              const result = await this.#webSearch!.search(args, signal);
-              return {
-                id: call.id,
-                content: truncateToolOutputToTokenBudget(
-                  formatWebSearchToolOutput(result),
-                  perCallTokenBudget,
-                ),
-              };
-            } catch (error) {
-              if (signal.aborted) {
-                throw new ModelGatewayFailure('model_timeout');
-              }
-              const message = error instanceof Error ? error.message : 'search_failed';
-              return {
-                id: call.id,
-                content: truncateToolOutputToTokenBudget(
-                  `Web search unavailable: ${message}`,
-                  perCallTokenBudget,
-                ),
-              };
-            }
-          }),
-        );
-
-        for (const toolOutput of toolOutputs) {
+        for (const toolOutput of batchResult.outputs) {
           messages.push({
             role: 'tool',
             tool_call_id: toolOutput.id,
@@ -555,8 +457,9 @@ export class OpenRouterModelGateway implements ModelGateway {
         );
         throw error;
       }
+      const webEvidence = evidenceCollector.build();
       return Object.freeze({
-        output,
+        output: webEvidence !== undefined ? { ...output, webEvidence } : output,
         modelLabel: this.#modelId,
         simulated: false as const,
         usage: sawMissingUsage ? null : accumulatedUsage,

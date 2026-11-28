@@ -2,6 +2,7 @@ import type {
   B1AssistantTurnDto,
   B1ConversationPage,
   B1MessageSubmissionReconciliationDto,
+  V2ConversationWebEvidencePage,
 } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import { V2_BUDGET_LIMITS, V2_TIMING_LIMITS } from '../contracts/constants.js';
@@ -485,6 +486,16 @@ export class AgentHeadCore
     readonly limit: number;
   }): Promise<B1ConversationPage> {
     return this.turnService.readMessages(req);
+  }
+
+  readWebEvidence(req: {
+    readonly tenantId: Id;
+    readonly agentId: Id;
+    readonly conversationId: Id;
+    readonly after: number;
+    readonly limit: number;
+  }): Promise<V2ConversationWebEvidencePage> {
+    return this.turnService.readWebEvidence(req);
   }
 
   findSubmissionReceipt(req: {

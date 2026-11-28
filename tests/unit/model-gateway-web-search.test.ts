@@ -409,10 +409,28 @@ describe('ExaWebSearchClient & web_search tool', () => {
     expect(step).toBe(2);
     expect(result.simulated).toBe(false);
     expect(result.modelLabel).toBe('deepseek-chat');
-    expect(result.output).toEqual({
+    expect(result.output).toMatchObject({
       kind: 'reply',
       text: 'Today in Shanghai is clear and 16C.',
       finishReason: 'stop',
+    });
+    expect(result.output.webEvidence?.sources[0]?.source_id).toMatch(/^ws_[a-f0-9]{16}$/);
+    expect(result.output.webEvidence).toEqual({
+      schema_version: 1,
+      turn_id: '00000000-0000-4000-8000-000000000004',
+      status: 'completed',
+      sources: [
+        {
+          source_id: result.output.webEvidence?.sources[0]?.source_id,
+          index: 1,
+          title: 'Shanghai Weather',
+          url: 'https://weather.example.com/shanghai',
+          domain: 'weather.example.com',
+          snippet: 'Clear, 16C.',
+          published_at: '2026-11-25',
+          fetched: false,
+        },
+      ],
     });
     expect(result.usage?.inputTokens).toBe(350);
     expect(result.usage?.outputTokens).toBe(50);
@@ -499,7 +517,9 @@ describe('ExaWebSearchClient & web_search tool', () => {
     const payloads: { messages: { role: string; content: string | null }[] }[] = [];
     let step = 0;
     const fetchImpl: FetchLike = (_url, init) => {
-      payloads.push(JSON.parse(init.body) as { messages: { role: string; content: string | null }[] });
+      payloads.push(
+        JSON.parse(init.body) as { messages: { role: string; content: string | null }[] },
+      );
       step += 1;
       if (step === 1) {
         return Promise.resolve(
@@ -619,17 +639,25 @@ describe('ExaWebSearchClient & web_search tool', () => {
     ];
 
     for (const query of sensitiveQueries) {
-      await expect(
-        client.search({ query }, new AbortController().signal),
-      ).rejects.toThrow(/privacy policy/);
+      await expect(client.search({ query }, new AbortController().signal)).rejects.toThrow(
+        /privacy policy/,
+      );
     }
     expect(fetchCalls).toBe(0);
   });
 
   it('blocks personal memory leakage into web_search queries while allowing explicit user-requested public queries', async () => {
     const memories = [
-      { kind: 'fact' as const, key: 'home', content: 'Lives at 742 Evergreen Terrace, Springfield' },
-      { kind: 'fact' as const, key: 'work', content: 'Works at Acme Secret Labs on Project Nightfall' },
+      {
+        kind: 'fact' as const,
+        key: 'home',
+        content: 'Lives at 742 Evergreen Terrace, Springfield',
+      },
+      {
+        kind: 'fact' as const,
+        key: 'work',
+        content: 'Works at Acme Secret Labs on Project Nightfall',
+      },
       { kind: 'fact' as const, key: 'cn_home', content: '家住北京朝阳区望京SOHO' },
       { kind: 'fact' as const, key: 'city', content: 'Lives in Tokyo' },
     ];
@@ -670,7 +698,9 @@ describe('ExaWebSearchClient & web_search tool', () => {
     let round = 0;
     const payloads: { messages: { role: string; content: string | null }[] }[] = [];
     const fetchImpl: FetchLike = (_url, init) => {
-      payloads.push(JSON.parse(init.body) as { messages: { role: string; content: string | null }[] });
+      payloads.push(
+        JSON.parse(init.body) as { messages: { role: string; content: string | null }[] },
+      );
       round += 1;
       if (round === 1) {
         return Promise.resolve(
@@ -706,7 +736,8 @@ describe('ExaWebSearchClient & web_search tool', () => {
             {
               message: {
                 role: 'assistant',
-                content: 'I cannot search external web services with private details from your memory.',
+                content:
+                  'I cannot search external web services with private details from your memory.',
               },
               finish_reason: 'stop',
             },
@@ -747,7 +778,9 @@ describe('ExaWebSearchClient & web_search tool', () => {
     expect(searchInvocations).toBe(0);
     expect(result.output.kind).toBe('reply');
     const toolMsg = payloads[1]!.messages.find((m) => m.role === 'tool');
-    expect(toolMsg?.content).toContain('Web search refused by privacy policy (personal_memory_leak)');
+    expect(toolMsg?.content).toContain(
+      'Web search refused by privacy policy (personal_memory_leak)',
+    );
   });
 
   it('reserves multi-round bounded cost in resolveV2ModelRuntime when EXA_API_KEY is configured', () => {
@@ -879,7 +912,9 @@ describe('Exa web_fetch', () => {
     let turnCall = 0;
     const fetchImpl: FetchLike = (_url, init) => {
       turnCall += 1;
-      payloads.push(JSON.parse(init.body ?? '{}') as { messages: Array<{ role: string; content?: string }> });
+      payloads.push(
+        JSON.parse(init.body ?? '{}') as { messages: Array<{ role: string; content?: string }> },
+      );
       if (turnCall === 1) {
         return Promise.resolve(
           jsonResponse(200, {
@@ -970,6 +1005,8 @@ describe('Exa web_fetch', () => {
     const toolMessages = payloads[1]!.messages.filter((m) => m.role === 'tool');
     expect(toolMessages).toHaveLength(2);
     expect(toolMessages[0]?.content).toContain('Key insight from the article.');
-    expect(toolMessages[1]?.content).toContain('Web fetch refused by safety policy (private_network)');
+    expect(toolMessages[1]?.content).toContain(
+      'Web fetch refused by safety policy (private_network)',
+    );
   });
 });

@@ -5,6 +5,7 @@ import {
   NotesActionItemsInputSchema,
   PYTHON_AGENT_LIMITS,
   TaskTitleSchema,
+  WebEvidenceSchema,
   toInvalidArgumentError,
 } from '@ember/contracts';
 import { z } from 'zod';
@@ -290,6 +291,7 @@ const TurnCommitResultSchema = z.discriminatedUnion('status', [
     personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
     personalMemoryDelete: personalMemoryDeleteTurnCommandSchema.optional(),
     proactiveScheduleCreate: proactiveScheduleTurnCommandSchema.optional(),
+    webEvidence: WebEvidenceSchema.optional(),
   }),
   z.strictObject({
     status: z.literal('failed'),
@@ -324,6 +326,7 @@ export const DurableTurnOutcomeSchema = z.strictObject({
   personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
   personalMemoryDelete: personalMemoryDeleteTurnCommandSchema.optional(),
   proactiveScheduleCreate: proactiveScheduleTurnCommandSchema.optional(),
+  webEvidence: WebEvidenceSchema.optional(),
   failureReason: z.enum(['timeout', 'internal_error']).optional(),
 });
 

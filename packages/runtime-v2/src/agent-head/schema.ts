@@ -1042,6 +1042,7 @@ export function createBudgetModePartitionDoMigration(
 }
 
 export const DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION = 10;
+export const DEFAULT_MESSAGE_WEB_EVIDENCE_MIGRATION_VERSION = 11;
 
 export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
   `ALTER TABLE v2_task_artifacts ADD COLUMN r2_key TEXT;`,
@@ -1074,6 +1075,25 @@ export function createV2TaskArtifactsR2Migration(
 }
 
 /** Agent Head migrations share the existing DO database and recovery registry. */
+export function createMessageWebEvidenceMigration(
+  version = DEFAULT_MESSAGE_WEB_EVIDENCE_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'message_web_evidence',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS message_web_evidence (
+  message_id     TEXT    PRIMARY KEY REFERENCES conversation_messages(id) ON DELETE CASCADE,
+  turn_id        TEXT    NOT NULL UNIQUE REFERENCES assistant_turns(id) ON DELETE CASCADE,
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+  status         TEXT    NOT NULL CHECK (status IN ('completed', 'partial', 'failed')),
+  evidence_json  TEXT    NOT NULL,
+  created_at_ms  INTEGER NOT NULL
+);`,
+    ],
+  };
+}
+
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
     createAgentHeadBusinessDoMigration(),
@@ -1096,5 +1116,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     createV2TaskArtifactsMigration(),
     createBudgetModePartitionDoMigration(),
     createV2TaskArtifactsR2Migration(),
+    createMessageWebEvidenceMigration(),
   ];
 }

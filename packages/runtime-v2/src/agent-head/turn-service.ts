@@ -1,11 +1,13 @@
 import {
   B1ConversationPageSchema,
   B1SendMessageReceiptSchema,
+  V2ConversationWebEvidencePageSchema,
   type B1AssistantTurnDto,
   type B1ConversationPage,
   type B1MessageSubmissionReconciliationDto,
   type B1SendMessageReceipt,
   type B1SendMessageRequest,
+  type V2ConversationWebEvidencePage,
 } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import {
@@ -67,7 +69,9 @@ import {
   getMainConversationSync,
   getTaskRowSync,
   getTurnRowSync,
+  hasMessageWebEvidenceTableSync,
   listAttachmentsForMessageSync,
+  listMessageWebEvidencePageSync,
   listReservedAttemptsSync,
   readRecentTurnContextSync,
   sqlExecAll,
@@ -446,7 +450,8 @@ export class AgentHeadTurnService implements AgentHeadRpc {
             estimatedMicroUsd,
             ceilingMicroUsd: this.globalDailyCeilingMicroUsd,
             errorName: err instanceof Error ? err.name : typeof err,
-            errorMessage: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+            errorMessage:
+              err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
           }),
         );
         throw new DomainError('DB_UNAVAILABLE', 'global budget authority unavailable');
@@ -1453,6 +1458,14 @@ export class AgentHeadTurnService implements AgentHeadRpc {
          )`,
         req.conversationId,
       );
+      if (hasMessageWebEvidenceTableSync(this.deps.storage.sql)) {
+        this.deps.storage.sql.exec(
+          `DELETE FROM message_web_evidence WHERE message_id IN (
+             SELECT id FROM conversation_messages WHERE conversation_id = ?
+           )`,
+          req.conversationId,
+        );
+      }
       this.deps.storage.sql.exec(
         `DELETE FROM conversation_messages WHERE conversation_id = ?`,
         req.conversationId,
@@ -1564,6 +1577,49 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           messages: pageMessages,
           next_after: lastMsg === undefined ? req.after : lastMsg.sequence,
           has_more: hasMore,
+        });
+      }),
+    );
+  }
+
+  readWebEvidence(req: {
+    readonly tenantId: Id;
+    readonly agentId: Id;
+    readonly conversationId: Id;
+    readonly after: number;
+    readonly limit: number;
+  }): Promise<V2ConversationWebEvidencePage> {
+    if (
+      !Number.isSafeInteger(req.after) ||
+      req.after < 0 ||
+      !Number.isSafeInteger(req.limit) ||
+      req.limit < 1 ||
+      req.limit > B1_MESSAGE_PAGE_MAX_LIMIT
+    ) {
+      throw new DomainError('INVALID_ARGUMENT', 'invalid readWebEvidence pagination cursor');
+    }
+
+    return Promise.resolve(
+      this.deps.storage.transactionSync(() => {
+        assertHeadScopeSync(this.deps.storage.sql, req.tenantId, req.agentId);
+        const conv = getConversationSync(this.deps.storage.sql, req.conversationId);
+        if (conv === null) {
+          throw new DomainError('NOT_FOUND', 'conversation not found in agent head');
+        }
+
+        const page = listMessageWebEvidencePageSync({
+          sql: this.deps.storage.sql,
+          conversationId: req.conversationId,
+          after: req.after,
+          limit: req.limit,
+        });
+
+        return V2ConversationWebEvidencePageSchema.parse({
+          conversation_id: conv.id,
+          transcript_epoch: conv.transcript_epoch,
+          items: page.items,
+          next_after: page.nextAfter,
+          has_more: page.hasMore,
         });
       }),
     );

@@ -11,3 +11,4 @@ export * from './persistence.js';
 export * from './runtime-ports.js';
 export * from './task-schemas.js';
 export * from './validation.js';
+export * from './web-evidence-schemas.js';

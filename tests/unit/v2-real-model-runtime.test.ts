@@ -2184,11 +2184,11 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
 
     const upgradedV10 = applyAgentHeadMigrations(storage, allMigrations, 4_500);
     expect(upgradedV10.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    expect(upgradedV10.appliedVersions).toEqual([10]);
+    expect(upgradedV10.appliedVersions).toEqual([10, 11]);
 
     const rerun = applyAgentHeadMigrations(storage, allMigrations, 5_000);
     expect(rerun.appliedVersions).toEqual([]);
-    expect(rerun.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(rerun.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
     const spendDdl = db
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_spend_days'")
